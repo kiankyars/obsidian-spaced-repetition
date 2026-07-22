@@ -383,8 +383,7 @@ export default class ContentManager {
         // Prefer the session's displayed side over uiManager.uiState. While the edit modal is
         // open uiState becomes EditModal, and if anything leaves uiState out of sync with the
         // card view we would otherwise skip the redraw after Save.
-        const previousCardState =
-            this.sessionData?.cardData.currentCardState ?? CardState.Front;
+        const previousCardState = this.sessionData?.cardData.currentCardState ?? CardState.Front;
         this.uiManager.setUIState(UIState.EditModal);
 
         try {
