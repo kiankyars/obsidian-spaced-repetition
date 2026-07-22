@@ -206,6 +206,11 @@ export class CardContainer {
         // Create context section
         this.drawCardContext(sessionData, settings);
 
+        const currentCard = sessionData.cardData.currentCard;
+        if (currentCard === null) {
+            return;
+        }
+
         // Build card content
         const wrapper: RenderMarkdownWrapper = new RenderMarkdownWrapper(
             this.app,
@@ -214,7 +219,7 @@ export class CardContainer {
         );
 
         await wrapper.renderMarkdownWrapper(
-            sessionData.cardData.currentCard.front.trimStart(),
+            currentCard.front.trimStart(),
             this.content,
             sessionData.currentQuestion.questionText.textDirection,
             // sessionData.cardData.currentCardState
@@ -358,13 +363,18 @@ export class CardContainer {
             this.drawCardContext(sessionData, settings);
         }
 
+        const currentCard = sessionData.cardData.currentCard;
+        if (currentCard === null) {
+            return;
+        }
+
         const wrapper: RenderMarkdownWrapper = new RenderMarkdownWrapper(
             this.app,
             this.plugin,
             sessionData.currentNote.filePath,
         );
         await wrapper.renderMarkdownWrapper(
-            sessionData.cardData.currentCard.back,
+            currentCard.back,
             this.content,
             sessionData.currentQuestion.questionText.textDirection,
             // sessionData.cardData.currentCardState,

@@ -375,41 +375,77 @@ export default class ContentManager {
     private async _doEditQuestionText(): Promise<void> {
         if (this.reviewSequencer === null) return;
         const currentCard: Card | null = this.reviewSequencer.currentCard;
+        if (currentCard === null) return;
         const currentQ: Question = this.reviewSequencer.currentQuestion;
 
         // Just the question/answer text; without any preceding topic tag
         const textPrompt = currentQ.questionText.actualQuestion;
-        const currentUIState = this.uiManager.uiState;
+        // Prefer the session's displayed side over uiManager.uiState. While the edit modal is
+        // open uiState becomes EditModal, and if anything leaves uiState out of sync with the
+        // card view we would otherwise skip the redraw after Save.
+        const previousCardState =
+            this.sessionData?.cardData.currentCardState ?? CardState.Front;
         this.uiManager.setUIState(UIState.EditModal);
-        const editModal = FlashcardEditModal.Prompt(
-            this.app,
-            this.settings,
-            currentCard,
-            textPrompt,
-            currentQ.questionText.textDirection,
-        );
-        await editModal
-            .then(async (modifiedCardText) => {
-                if (this.reviewSequencer === null) return;
-                await this.reviewSequencer.updateCurrentQuestionTextAndCards(modifiedCardText);
-                this.uiManager.setUIState(currentUIState);
 
-                if (this.sessionData !== null) {
-                    if (this.uiManager.uiState === UIState.CardFront) {
-                        await this.cardContainer.drawCardFront(this.sessionData, this.settings);
-                    }
+        try {
+            const modifiedCardText = await FlashcardEditModal.Prompt(
+                this.app,
+                this.settings,
+                currentCard,
+                textPrompt,
+                currentQ.questionText.textDirection,
+            );
 
-                    if (this.uiManager.uiState === UIState.CardBack) {
-                        await this.cardContainer.drawBack(
-                            this.sessionData,
-                            this.reviewMode,
-                            this.settings,
-                            this._determineButtonSchedule.bind(this),
-                        );
-                    }
-                }
-            })
-            .catch((reason) => console.log(reason));
+            if (this.reviewSequencer === null) return;
+
+            await this.reviewSequencer.updateCurrentQuestionTextAndCards(modifiedCardText);
+            await this._refreshCurrentCardView(previousCardState);
+        } catch (reason) {
+            // Cancel / empty input rejects with NO_INPUT — restore UI and ignore.
+            this.uiManager.setUIState(
+                previousCardState === CardState.Back ? UIState.CardBack : UIState.CardFront,
+            );
+            if (reason !== t("NO_INPUT")) {
+                console.error("SR: Failed to edit flashcard", reason);
+            }
+        }
+    }
+
+    /**
+     * Sync session data from the review sequencer and redraw the current card after an in-place
+     * edit. The note file is already updated; this refreshes the in-memory front/back in the UI.
+     */
+    private async _refreshCurrentCardView(cardState: CardState): Promise<void> {
+        if (this.reviewSequencer === null || this.sessionData === null) {
+            this.uiManager.setUIState(
+                cardState === CardState.Back ? UIState.CardBack : UIState.CardFront,
+            );
+            return;
+        }
+
+        // Sequencer owns the live Card objects after updateCurrentQuestionTextAndCards.
+        this.sessionData.cardData.currentCard = this.reviewSequencer.currentCard;
+        this.sessionData.currentQuestion = this.reviewSequencer.currentQuestion;
+        this.sessionData.currentNote = this.reviewSequencer.currentNote;
+        this.sessionData.cardData.currentCardState = cardState;
+
+        if (this.sessionData.cardData.currentCard === null) {
+            this.uiManager.setUIState(UIState.CardFront);
+            return;
+        }
+
+        if (cardState === CardState.Back) {
+            this.uiManager.setUIState(UIState.CardBack);
+            await this.cardContainer.drawBack(
+                this.sessionData,
+                this.reviewMode,
+                this.settings,
+                this._determineButtonSchedule.bind(this),
+            );
+        } else {
+            this.uiManager.setUIState(UIState.CardFront);
+            await this.cardContainer.drawCardFront(this.sessionData, this.settings);
+        }
     }
 
     public async _jumpToCurrentCard(): Promise<void> {

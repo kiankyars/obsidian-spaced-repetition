@@ -440,16 +440,24 @@ export class FlashcardReviewSequencer implements IFlashcardReviewSequencer {
 
         await this.currentQuestion.writeQuestion(this.settings);
 
-        if (cardFrontBackList.length !== question.cards.length) {
-            console.warn("SR: Cards count does not match question text. Skipping redraw.");
-            new Notice("Cards count does not match cards from question text. Skipping redraw.");
-            return;
-        }
-        question.cards.forEach((card, i) => {
+        // Always refresh in-memory faces for the overlapping cards so the review UI can redraw
+        // after Save. When the number of generated cards changes (e.g. cloze deletions), we
+        // still update as many as possible and notify the user that sibling count changed.
+        const updateCount = Math.min(cardFrontBackList.length, question.cards.length);
+        for (let i = 0; i < updateCount; i++) {
             const { front, back } = cardFrontBackList[i];
-            card.front = front;
-            card.back = back;
-        });
+            question.cards[i].front = front;
+            question.cards[i].back = back;
+        }
+
+        if (cardFrontBackList.length !== question.cards.length) {
+            console.warn(
+                "SR: Cards count does not match question text. Updated overlapping cards only.",
+            );
+            new Notice(
+                "Card count changed after edit. Updated current card text; restart review to fully re-parse siblings.",
+            );
+        }
     }
 
     async deleteCurrentCardFromNote(): Promise<void> {

@@ -132,12 +132,17 @@ export default class CardToolbarComponent {
         chosenDeck: Deck,
         currentDeck: Deck,
         chosenDeckStats: DeckStats,
-        currentDeckStats: DeckStats,
+        currentDeckStats: DeckStats | null,
         totalCardsInSession: number,
         totalDecksInSession: number,
         currentDeckTotalCardsInQueue: number,
         flashcardCardOrder: string,
     ) {
+        const currentDeckProgress =
+            currentDeckStats === null
+                ? 0
+                : currentDeckTotalCardsInQueue - currentDeckStats.cardsInQueueOfThisDeckCount;
+
         this.infoSection.updateInfo(
             chosenDeck.deckName,
             totalCardsInSession,
@@ -146,7 +151,7 @@ export default class CardToolbarComponent {
             totalDecksInSession - chosenDeckStats.decksInQueueOfThisDeckCount,
             currentDeck.deckName,
             currentDeckTotalCardsInQueue,
-            currentDeckTotalCardsInQueue - currentDeckStats.cardsInQueueOfThisDeckCount,
+            currentDeckProgress,
             flashcardCardOrder === "EveryCardRandomDeckAndCard",
         );
     }

@@ -1348,6 +1348,23 @@ async function checkupdateCurrentQuestionTextAndCards(
     }
     const expectedFileText: string = c.originalText.replace(originalStr, updatedStr);
     expect(await c.file.read()).toEqual(expectedFileText);
+
+    // Review UI reads these in-memory faces after Save; they must update with the file.
+    // Prefer single-line split; fall back to multiline line-based separator.
+    let expectedFront: string;
+    let expectedBack: string;
+    if (updatedQ.includes(settings.singleLineCardSeparator)) {
+        const idx = updatedQ.indexOf(settings.singleLineCardSeparator);
+        expectedFront = updatedQ.substring(0, idx);
+        expectedBack = updatedQ.substring(idx + settings.singleLineCardSeparator.length);
+    } else {
+        const lines = updatedQ.split("\n");
+        const sepIdx = lines.findIndex((line) => line.trim() === settings.multilineCardSeparator);
+        expectedFront = lines.slice(0, sepIdx).join("\n");
+        expectedBack = lines.slice(sepIdx + 1).join("\n");
+    }
+    expect(c.reviewSequencer.currentCard.front).toEqual(expectedFront);
+    expect(c.reviewSequencer.currentCard.back).toEqual(expectedBack);
     return c;
 }
 
