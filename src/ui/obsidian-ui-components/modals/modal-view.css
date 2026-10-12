@@ -11,6 +11,8 @@
     padding: 0;
 }
 
+/* The review toolbar supplies its own close button. */
+#sr-modal-view > .modal-header-button,
 #sr-modal-view .modal-close-button,
 #sr-modal-view .modal-header {
     display: none;

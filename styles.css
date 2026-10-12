@@ -668,6 +668,7 @@ body:not(.is-mobile)
   overflow: visible;
   padding: 0;
 }
+#sr-modal-view > .modal-header-button,
 #sr-modal-view .modal-close-button,
 #sr-modal-view .modal-header {
   display: none;
