@@ -1,580 +1,266 @@
-import { Notice, Platform, Plugin, TFile } from "obsidian";
+import { Component, getAllTags, MarkdownRenderer, Modal, Notice, Plugin, TFile } from "obsidian";
+import { deleteQuestion, isFlashcardNote, updateSchedules } from "./cards";
+import { cardsFromNote, readyCards, type ReviewCard } from "./queue";
+import { formatInterval, preview, readSchedule, REMNOTE_RATINGS, State, writeSchedule, type Grade } from "./scheduler";
 
-import { ReviewResponse } from "src/algorithms/base/repetition-item";
-import { SrsAlgorithm } from "src/algorithms/base/srs-algorithm";
-import { ObsidianVaultNoteLinkInfoFinder } from "src/algorithms/osr/obsidian-vault-notelink-info-finder";
-import { SrsAlgorithmOsr } from "src/algorithms/osr/srs-algorithm-osr";
-import {
-    FlashcardReviewMode,
-    FlashcardReviewSequencer,
-    IFlashcardReviewSequencer,
-} from "src/card/flashcard-review-sequencer";
-import { QuestionPostponementList } from "src/card/questions/question-postponement-list";
-import { OsrAppCore } from "src/core";
-import { DataStoreAlgorithm } from "src/data-store-algorithm/data-store-algorithm";
-import { DataStoreInNoteAlgorithmOsr } from "src/data-store-algorithm/data-store-in-note-algorithm-osr";
-import { DataStore } from "src/data-stores/base/data-store";
-import { StoreInNotes } from "src/data-stores/notes/notes";
-import { Deck, DeckTreeFilter } from "src/deck/deck";
-import {
-    CardOrder,
-    DeckOrder,
-    DeckTreeIterator,
-    IDeckTreeIterator,
-    IIteratorOrder,
-} from "src/deck/deck-tree-iterator";
-import { TopicPath } from "src/deck/topic-path";
-import { ISRFile, SrTFile } from "src/file";
-import { t } from "src/lang/helpers";
-import { NextNoteReviewHandler } from "src/note/next-note-review-handler";
-import { Note } from "src/note/note";
-import { NoteFileLoader } from "src/note/note-file-loader";
-import { NoteReviewQueue } from "src/note/note-review-queue";
-import { setDebugParser } from "src/parser";
-import { DEFAULT_DATA, PluginData } from "src/plugin-data";
-import { DEFAULT_SETTINGS, SettingsUtil, SRSettings, upgradeSettings } from "src/settings";
-import { REVIEW_QUEUE_VIEW_TYPE } from "src/ui/obsidian-ui-components/item-views/review-queue-list-view";
-import { UIManager, UIState } from "src/ui/ui-manager";
-import EmulatedPlatform from "src/utils/platform-detector";
-import { convertToStringOrEmpty, TextDirection } from "src/utils/strings";
+export default class MinimalFlashcards extends Plugin {
+    private reviewer?: Reviewer;
+    private pendingWrite?: Promise<void>;
 
-export default class SRPlugin extends Plugin {
-    public data: PluginData;
-    public osrAppCore: OsrAppCore;
-    public uiManager: UIManager;
-
-    public nextNoteReviewHandler: NextNoteReviewHandler;
-
-    async onload(): Promise<void> {
-        await this.loadPluginData();
-
-        const noteReviewQueue = new NoteReviewQueue();
-        this.nextNoteReviewHandler = new NextNoteReviewHandler(
-            this.app,
-            this.data.settings,
-            noteReviewQueue,
-        );
-
-        const questionPostponementList: QuestionPostponementList = new QuestionPostponementList(
-            this,
-            this.data.settings,
-            this.data.buryList,
-        );
-        await questionPostponementList.clearIfNewDay(this.data);
-
-        const osrNoteLinkInfoFinder: ObsidianVaultNoteLinkInfoFinder =
-            new ObsidianVaultNoteLinkInfoFinder(this.app.metadataCache);
-
-        this.osrAppCore = new OsrAppCore(this.app);
-        this.osrAppCore.init(
-            questionPostponementList,
-            osrNoteLinkInfoFinder,
-            this.data.settings,
-            this.onOsrVaultDataChanged.bind(this),
-            noteReviewQueue,
-        );
-
-        this.uiManager = new UIManager(this);
-
-        this.addPluginCommands();
-    }
-
-    public removeCustomHotkeys() {
-        this.removeCommand("srs-card-review-again");
-        this.removeCommand("srs-card-review-hard");
-        this.removeCommand("srs-card-review-good");
-        this.removeCommand("srs-card-review-easy");
-        this.removeCommand("srs-card-review-show-answer");
-        this.removeCommand("srs-card-review-reset");
-        this.removeCommand("srs-card-review-skip");
-    }
-
-    public addCustomHotkeys() {
-        this.addCommand({
-            id: "srs-card-review-again",
-            name: t("REVIEW_CARD_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardAgainText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardBack &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._processReview(ReviewResponse.Again);
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-hard",
-            name: t("REVIEW_CARD_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardHardText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardBack &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._processReview(ReviewResponse.Hard);
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-good",
-            name: t("REVIEW_CARD_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardGoodText,
-            }),
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardBack &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._processReview(ReviewResponse.Good);
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-easy",
-            name: t("REVIEW_CARD_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardEasyText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardBack &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._processReview(ReviewResponse.Easy);
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-show-answer",
-            name: t("SHOW_ANSWER"),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardFront &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._showAnswer();
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-skip",
-            name: t("SKIP"),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    (this.uiManager.uiState === UIState.CardBack ||
-                        this.uiManager.uiState === UIState.CardFront) &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._skipCurrentCard();
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-card-review-reset",
-            name: t("RESET_CARD_PROGRESS"),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                if (
-                    this.uiManager.uiState === UIState.CardBack &&
-                    this.uiManager.isSRInFocus &&
-                    this.uiManager.contentManager !== null &&
-                    !(
-                        Platform.isMobile || // No keyboard events on mobile
-                        EmulatedPlatform().isMobile
-                    ) &&
-                    !(
-                        document.activeElement !== null &&
-                        (document.activeElement.nodeName === "TEXTAREA" ||
-                            document.activeElement.nodeName === "INPUT")
-                    )
-                ) {
-                    if (!checking) {
-                        this.uiManager.contentManager._processReview(ReviewResponse.Reset);
-                    }
-                    return true;
-                }
-                return false;
-            },
-        });
-    }
-
-    private addPluginCommands() {
-        if (this.data.settings.useCustomHotkeys) {
-            this.addCustomHotkeys();
-        }
-
-        this.addCommand({
-            id: "srs-note-review-open-note",
-            name: t("OPEN_NOTE_FOR_REVIEW"),
-            callback: async () => {
-                if (!this.osrAppCore.syncLock) {
-                    await this.sync();
-                    this.nextNoteReviewHandler.reviewNextNoteModal();
-                }
-            },
-        });
-
-        this.addCommand({
-            id: "srs-note-review-easy",
-            name: t("REVIEW_NOTE_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardEasyText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                const openFile: TFile | null = this.app.workspace.getActiveFile();
-
-                if (openFile === null || openFile.extension !== "md") return false;
-
-                if (!checking) {
-                    this.saveNoteReviewResponse(openFile, ReviewResponse.Easy);
-                }
-                return true;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-note-review-good",
-            name: t("REVIEW_NOTE_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardGoodText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                const openFile: TFile | null = this.app.workspace.getActiveFile();
-
-                if (openFile === null || openFile.extension !== "md") return false;
-
-                if (!checking) {
-                    this.saveNoteReviewResponse(openFile, ReviewResponse.Good);
-                }
-                return true;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-note-review-hard",
-            name: t("REVIEW_NOTE_DIFFICULTY_CMD", {
-                difficulty: this.data.settings.flashcardHardText,
-            }),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                const openFile: TFile | null = this.app.workspace.getActiveFile();
-
-                if (openFile === null || openFile.extension !== "md") return false;
-
-                if (!checking) {
-                    this.saveNoteReviewResponse(openFile, ReviewResponse.Hard);
-                }
-                return true;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-review-flashcards",
-            name: t("REVIEW_ALL_CARDS"),
-            callback: async () => {
-                await this.uiManager.openDeckContainer(FlashcardReviewMode.Review);
-            },
-        });
-
-        this.addCommand({
-            id: "srs-cram-flashcards",
-            name: t("CRAM_ALL_CARDS"),
-            callback: async () => {
-                await this.uiManager.openDeckContainer(FlashcardReviewMode.Cram);
-            },
-        });
-
-        this.addCommand({
-            id: "srs-review-flashcards-in-note",
-            name: t("REVIEW_CARDS_IN_NOTE"),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                const openFile: TFile | null = this.app.workspace.getActiveFile();
-
-                if (openFile === null || openFile.extension !== "md") return false;
-
-                if (!checking) {
-                    this.uiManager.openDeckContainer(FlashcardReviewMode.Review, openFile);
-                }
-                return true;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-cram-flashcards-in-note",
-            name: t("CRAM_CARDS_IN_NOTE"),
-            repeatable: false,
-            checkCallback: (checking: boolean) => {
-                const openFile: TFile | null = this.app.workspace.getActiveFile();
-
-                if (openFile === null || openFile.extension !== "md") return false;
-
-                if (!checking) {
-                    this.uiManager.openDeckContainer(FlashcardReviewMode.Cram, openFile);
-                }
-                return true;
-            },
-        });
-
-        this.addCommand({
-            id: "srs-open-review-queue-view",
-            name: t("OPEN_REVIEW_QUEUE_VIEW"),
-            callback: async () => {
-                await this.uiManager.sidebarManager.openReviewQueueView();
-            },
-        });
+    onload(): void {
+        this.addCommand({ id: "review-all", name: "Review all cards", callback: () => void this.openReviewer() });
+        this.addRibbonIcon("layers", "Review all cards", () => void this.openReviewer());
     }
 
     onunload(): void {
-        this.app.workspace.getLeavesOfType(REVIEW_QUEUE_VIEW_TYPE).forEach((leaf) => leaf.detach());
-        this.uiManager.destroy();
+        this.reviewer?.close();
     }
 
-    public getPreparedReviewSequencer(
-        fullDeckTree: Deck,
-        remainingDeckTree: Deck,
-        reviewMode: FlashcardReviewMode,
-    ): { reviewSequencer: IFlashcardReviewSequencer; mode: FlashcardReviewMode } {
-        const deckIterator: IDeckTreeIterator = SRPlugin.createDeckTreeIterator(this.data.settings);
-
-        const reviewSequencer: IFlashcardReviewSequencer = new FlashcardReviewSequencer(
-            reviewMode,
-            deckIterator,
-            this.data.settings,
-            SrsAlgorithm.getInstance(),
-            this.osrAppCore.questionPostponementList,
-            this.osrAppCore.dueDateFlashcardHistogram,
-        );
-
-        reviewSequencer.setDeckTree(fullDeckTree, remainingDeckTree);
-        return { reviewSequencer, mode: reviewMode };
+    private async openReviewer(): Promise<void> {
+        try {
+            await this.pendingWrite;
+            if (this.reviewer) return;
+            this.reviewer = new Reviewer(this);
+            this.reviewer.open();
+        } catch (error) {
+            this.report(error);
+        }
     }
 
-    public async getPreparedDecksForSingleNoteReview(
-        file: TFile,
-        mode: FlashcardReviewMode,
-    ): Promise<{ deckTree: Deck; remainingDeckTree: Deck; mode: FlashcardReviewMode }> {
-        const note: Note = await this.loadNote(file);
-
-        const deckTree = new Deck("root", null);
-        note.appendCardsToDeck(deckTree);
-        const remainingDeckTree = DeckTreeFilter.filterForRemainingCards(
-            this.osrAppCore.questionPostponementList,
-            deckTree,
-            mode,
-        );
-
-        return { deckTree, remainingDeckTree, mode };
+    release(reviewer: Reviewer): void {
+        if (this.reviewer === reviewer) this.reviewer = undefined;
     }
 
-    private static createDeckTreeIterator(settings: SRSettings): IDeckTreeIterator {
-        let cardOrder: CardOrder = CardOrder[settings.flashcardCardOrder as keyof typeof CardOrder];
-        if (cardOrder === undefined) cardOrder = CardOrder.DueFirstSequential;
-        let deckOrder: DeckOrder = DeckOrder[settings.flashcardDeckOrder as keyof typeof DeckOrder];
-        if (deckOrder === undefined) deckOrder = DeckOrder.PrevDeckComplete_Sequential;
-
-        const iteratorOrder: IIteratorOrder = {
-            deckOrder,
-            cardOrder,
-        };
-        return new DeckTreeIterator(iteratorOrder, null);
+    async write(action: () => Promise<void>): Promise<void> {
+        if (this.pendingWrite) throw new Error("A card update is still being saved.");
+        const pending = action();
+        this.pendingWrite = pending;
+        try {
+            await pending;
+        } finally {
+            if (this.pendingWrite === pending) this.pendingWrite = undefined;
+        }
     }
 
-    async sync(): Promise<void> {
-        if (this.osrAppCore.syncLock) {
+    report(error: unknown): void {
+        new Notice(error instanceof Error ? error.message : "Could not update the card.", 8000);
+        console.error("Minimal Flashcards:", error);
+    }
+}
+
+class Reviewer extends Modal {
+    private cards: ReviewCard[] = [];
+    private current?: ReviewCard;
+    private revealed = false;
+    private busy = true;
+    private closed = false;
+    private renderId = 0;
+    private markdown?: Component;
+    private wakeTimer?: number;
+
+    constructor(private plugin: MinimalFlashcards) {
+        super(plugin.app);
+        this.scope.register([], " ", (event) => {
+            if (!event.repeat && !this.busy && !this.revealed && this.current) void this.reveal();
+            return false;
+        });
+        for (const { rating } of REMNOTE_RATINGS) {
+            this.scope.register([], String(rating), (event) => {
+                if (!event.repeat && this.revealed) void this.rate(rating);
+                return false;
+            });
+        }
+    }
+
+    onOpen(): void {
+        this.modalEl.addClass("minimal-flashcards");
+        this.titleEl.setText("Flashcards");
+        this.contentEl.setText("Loading cards…");
+        void this.load();
+    }
+
+    onClose(): void {
+        this.closed = true;
+        this.renderId++;
+        if (this.wakeTimer !== undefined) window.clearInterval(this.wakeTimer);
+        this.markdown?.unload();
+        this.plugin.release(this);
+        this.contentEl.empty();
+    }
+
+    private async load(): Promise<void> {
+        try {
+            const now = new Date();
+            const files = this.app.vault.getMarkdownFiles().filter((file) => {
+                const cache = this.app.metadataCache.getFileCache(file);
+                return !cache || (getAllTags(cache) ?? []).some((tag) => tag === "#flashcards" || tag.startsWith("#flashcards/"));
+            });
+            const notes = await Promise.all(files.map(async (file) => {
+                const text = await this.app.vault.cachedRead(file);
+                if (!isFlashcardNote(text)) return [];
+                try {
+                    return cardsFromNote(file.path, text, now);
+                } catch (error) {
+                    throw new Error(`${file.path}: ${error instanceof Error ? error.message : "Could not read cards."}`);
+                }
+            }));
+            this.cards = notes.flat();
+            await this.advance();
+            if (!this.closed) {
+                this.wakeTimer = window.setInterval(() => {
+                    if (!this.busy && !this.current && readyCards(this.cards, new Date()).length) void this.advance();
+                }, 1000);
+            }
+        } catch (error) {
+            if (!this.closed) {
+                this.contentEl.setText("Could not load cards. Close and reopen to try again.");
+                this.plugin.report(error);
+            }
+        }
+    }
+
+    private async advance(): Promise<void> {
+        if (this.closed) return;
+        this.current = readyCards(this.cards, new Date())[0];
+        this.revealed = false;
+        await this.render();
+    }
+
+    private async reveal(): Promise<void> {
+        if (this.busy || this.closed || !this.current || this.revealed) return;
+        this.revealed = true;
+        await this.render();
+    }
+
+    private async render(): Promise<void> {
+        if (this.closed) return;
+        this.busy = true;
+        const id = ++this.renderId;
+        this.markdown?.unload();
+        this.markdown = new Component();
+        this.markdown.load();
+        this.contentEl.empty();
+        const current = this.current;
+        try {
+            if (!current) {
+                this.contentEl.createEl("p", { text: "All caught up.", cls: "mf-empty" });
+                const upcoming = this.cards.filter((card) => card.schedule.state !== State.New)
+                    .sort((a, b) => a.schedule.due.getTime() - b.schedule.due.getTime())[0];
+                if (upcoming) this.contentEl.createEl("p", { text: `Next card in ${formatInterval(upcoming.schedule.due, new Date())}.`, cls: "mf-next" });
+                return;
+            }
+            const toolbar = this.contentEl.createDiv({ cls: "mf-toolbar" });
+            const remaining = readyCards(this.cards, new Date());
+            const due = remaining.filter((card) => card.schedule.state !== State.New).length;
+            toolbar.createSpan({ text: `${due} due · ${remaining.length - due} new`, cls: "mf-count" });
+            this.button(toolbar, "Open note", () => void this.openNote());
+            this.button(toolbar, "Delete", () => void this.remove(), "mf-delete");
+            const basename = current.path.split("/").pop()?.replace(/\.md$/, "") ?? current.path;
+            this.contentEl.createEl("p", { text: [basename, current.question.context].filter(Boolean).join(" › "), cls: "mf-context" });
+            const body = this.contentEl.createDiv({ cls: "mf-body markdown-preview-view" });
+            const variant = current.question.variants[current.variant];
+            if (this.revealed && !current.question.cloze) {
+                const front = body.createDiv();
+                await MarkdownRenderer.render(this.app, variant.front, front, current.path, this.markdown);
+                if (this.closed || id !== this.renderId) return;
+                body.createEl("hr");
+            }
+            const face = body.createDiv();
+            await MarkdownRenderer.render(this.app, this.revealed ? variant.back : variant.front, face, current.path, this.markdown);
+            if (this.closed || id !== this.renderId) return;
+            const actions = this.contentEl.createDiv({ cls: "mf-actions" });
+            if (!this.revealed) {
+                this.button(actions, "Show answer", () => void this.reveal(), "mod-cta mf-show");
+                actions.createSpan({ text: "Space", cls: "mf-shortcut" });
+            } else {
+                const now = new Date();
+                const choices = preview(current.schedule, now);
+                actions.addClass("mf-ratings");
+                for (const { rating, label } of REMNOTE_RATINGS) {
+                    const button = this.button(actions, "", () => void this.rate(rating));
+                    button.setAttribute("aria-label", `${label}, ${formatInterval(choices[rating].card.due, now)}`);
+                    button.createSpan({ text: label });
+                    button.createEl("small", { text: `${rating} · ${formatInterval(choices[rating].card.due, now)}` });
+                }
+            }
+        } catch (error) {
+            if (!this.closed) this.plugin.report(error);
+        } finally {
+            if (id === this.renderId) this.busy = false;
+        }
+    }
+
+    private button(parent: HTMLElement, text: string, action: () => void, cls?: string): HTMLButtonElement {
+        const button = parent.createEl("button", { text, cls });
+        button.addEventListener("click", action);
+        return button;
+    }
+
+    private async mutate(transform: (text: string, current: ReviewCard, now: Date) => string): Promise<void> {
+        const current = this.current;
+        if (this.busy || this.closed || !current) return;
+        this.busy = true;
+        this.contentEl.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+        try {
+            await this.plugin.write(async () => {
+                const file = this.app.vault.getFileByPath(current.path);
+                if (!file) throw new Error("The card’s note no longer exists. Close and reopen the reviewer.");
+                const now = new Date();
+                const updated = await this.app.vault.process(file, (text) => {
+                    if (text !== current.snapshot) {
+                        throw new Error("This note changed while you were reviewing. Close and reopen the reviewer to refresh it.");
+                    }
+                    return transform(text, current, now);
+                });
+                this.cards = this.cards.filter((card) => card.path !== current.path);
+                if (isFlashcardNote(updated)) this.cards.push(...cardsFromNote(file.path, updated, now));
+            });
+            await this.advance();
+        } catch (error) {
+            if (!this.closed) {
+                this.plugin.report(error);
+                await this.render();
+            }
+        } finally {
+            this.busy = false;
+        }
+    }
+
+    private async rate(rating: Grade): Promise<void> {
+        if (!this.revealed) return;
+        await this.mutate((text, current, now) => {
+            const tokens = [...current.question.schedules];
+            for (let i = 0; i < current.question.variants.length; i++) {
+                if (!tokens[i]) tokens[i] = writeSchedule(readSchedule(undefined, now));
+            }
+            tokens[current.variant] = writeSchedule(preview(current.schedule, now)[rating].card);
+            return updateSchedules(text, current.question, tokens);
+        });
+    }
+
+    private async remove(): Promise<void> {
+        await this.mutate((text, current) => deleteQuestion(text, current.question));
+    }
+
+    private async openNote(): Promise<void> {
+        if (this.busy || this.closed || !this.current) return;
+        this.busy = true;
+        this.contentEl.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+        const current = this.current;
+        const file = this.app.vault.getFileByPath(current.path);
+        if (!(file instanceof TFile)) {
+            this.plugin.report(new Error("The card’s note no longer exists."));
+            await this.render();
             return;
         }
-
-        const now = window.moment(Date.now());
-        this.osrAppCore.defaultTextDirection = this.getObsidianRtlSetting();
-
-        await this.osrAppCore.loadVault();
-
-        if (this.data.settings.showSchedulingDebugMessages) {
-            console.log(`SR: ${t("DECKS")}`, this.osrAppCore.reviewableDeckTree);
-            console.log(
-                "SR: " +
-                    t("SYNC_TIME_TAKEN", {
-                        t: Date.now() - now.valueOf(),
-                    }),
-            );
+        try {
+            const text = await this.app.vault.cachedRead(file);
+            const line = text.slice(0, current.question.start).split("\n").length - 1;
+            await this.app.workspace.getLeaf(false).openFile(file, { eState: { line } });
+            this.close();
+        } catch (error) {
+            this.plugin.report(error);
+            await this.render();
         }
-    }
-
-    private onOsrVaultDataChanged() {
-        this.uiManager.updateStatusBar();
-        if (this.data.settings.enableNoteReviewPaneOnStartup)
-            this.uiManager.sidebarManager.redraw();
-    }
-
-    async loadNote(noteFile: TFile): Promise<Note> {
-        const loader: NoteFileLoader = new NoteFileLoader(this.data.settings);
-        const srFile: ISRFile = this.createSrTFile(noteFile);
-        const folderTopicPath: TopicPath = TopicPath.getFolderPathFromFilename(
-            srFile,
-            this.data.settings,
-        );
-
-        const note: Note = await loader.load(
-            this.createSrTFile(noteFile),
-            this.getObsidianRtlSetting(),
-            folderTopicPath,
-        );
-        if (note.hasChanged) {
-            note.writeNoteFile(this.data.settings);
-        }
-        return note;
-    }
-
-    private getObsidianRtlSetting(): TextDirection {
-        // Get the direction with Obsidian's own setting
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const v: any = (this.app.vault as any).getConfig("rightToLeft");
-        return convertToStringOrEmpty(v) === "true" ? TextDirection.Rtl : TextDirection.Ltr;
-    }
-
-    async saveNoteReviewResponse(note: TFile, response: ReviewResponse): Promise<void> {
-        const noteSrTFile: ISRFile = this.createSrTFile(note);
-
-        if (SettingsUtil.isPathInNoteIgnoreFolder(this.data.settings, note.path)) {
-            new Notice(t("NOTE_IN_IGNORED_FOLDER"));
-            return;
-        }
-
-        const tags = noteSrTFile.getAllTagsFromCache();
-        if (!SettingsUtil.isAnyTagANoteReviewTag(this.data.settings, tags)) {
-            new Notice(t("PLEASE_TAG_NOTE"));
-            return;
-        }
-
-        //
-        await this.osrAppCore.saveNoteReviewResponse(noteSrTFile, response, this.data.settings);
-
-        new Notice(t("RESPONSE_RECEIVED"));
-
-        if (this.data.settings.autoNextNote) {
-            this.nextNoteReviewHandler.autoReviewNextNote();
-        }
-    }
-
-    createSrTFile(note: TFile): SrTFile {
-        return new SrTFile(this.app.vault, this.app.metadataCache, this.app.fileManager, note);
-    }
-
-    async loadPluginData(): Promise<void> {
-        const loadedData: PluginData = await this.loadData();
-        if (loadedData?.settings) upgradeSettings(loadedData.settings);
-        this.data = Object.assign({}, DEFAULT_DATA, loadedData);
-        this.data.settings = Object.assign({}, DEFAULT_SETTINGS, this.data.settings);
-        setDebugParser(this.data.settings.showParserDebugMessages);
-
-        this.setupDataStoreAndAlgorithmInstances(this.data.settings);
-    }
-
-    setupDataStoreAndAlgorithmInstances(settings: SRSettings) {
-        // For now we can hardcode as we only support the one data store and one algorithm
-        DataStore.instance = new StoreInNotes(settings);
-        SrsAlgorithm.instance = new SrsAlgorithmOsr(settings);
-        DataStoreAlgorithm.instance = new DataStoreInNoteAlgorithmOsr(settings);
-    }
-    async savePluginData(): Promise<void> {
-        await this.saveData(this.data);
     }
 }
